@@ -11,4 +11,6 @@ crc = "3.2.1"
 get_if_addrs = "0.5.3"
 num-traits = "0.2.19"
 pnet = "0.35.0"
+three-d = "0.17.0"
+three-d-asset = {version = "0.7",features = ["pcd", "http"] }
 tokio = {version = "1.39.2", features = ["full"]}
