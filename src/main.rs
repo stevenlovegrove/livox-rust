@@ -2,7 +2,10 @@ use binrw::{binrw, io::Cursor, meta::WriteEndian, BinRead, BinWrite, VecArgs};
 use crc::*;
 use get_if_addrs::get_if_addrs;
 use pnet::datalink::{self, NetworkInterface};
-use std::{io::{Read, Write}, net::SocketAddr};
+use std::{
+    io::{Read, Write},
+    net::SocketAddr,
+};
 use tokio::net::UdpSocket;
 
 const CRC_HEADER: Crc<u16> = crc::Crc::<u16>::new(&crc::Algorithm {
@@ -109,20 +112,20 @@ struct LidarPacket {
 #[derive(BinRead, BinWrite, Debug, Copy, Clone, PartialEq)]
 #[brw(repr(u8))]
 enum RetCode {
-LvxRetSuccess = 0x00, // Execution succeed
-LvxRetFailure = 0x01, // Execution failed
-LvxRetNotPermitNow  = 0x02, // Current state does not support
-LvxRetOutOfRange = 0x03, // Setting value out of range
-LvxRetParamNotsupport = 0x20, // The parameter is not supported
-LvxRetParamRebootEffect = 0x21, // Parameters need to reboot to take effect
-LvxRetParamRdOnly = 0x22, // The parameter is read-only and cannot be written
-LvxRetParamInvalidLen = 0x23, // The request parameter length is wrong, or the ack packet exceeds the maximum length
-LvxRetParamKeyNumErr = 0x24, // Parameter key_ num and key_ list mismatch
-LvxRetUpgradePubKeyError = 0x30, // Public key signature verification error
-LvxRetUpgradeDigestError = 0x31, // Digest check error
-LvxRetUpgradeFwTypeError = 0x32, // Firmware type mismatch
-LvxRetUpgradeFwOutOfRange = 0x33, // Firmware length out of range
-LvxRetUpgradeFwErasing = 0x34, // Firmware erasing
+    LvxRetSuccess = 0x00,             // Execution succeed
+    LvxRetFailure = 0x01,             // Execution failed
+    LvxRetNotPermitNow = 0x02,        // Current state does not support
+    LvxRetOutOfRange = 0x03,          // Setting value out of range
+    LvxRetParamNotsupport = 0x20,     // The parameter is not supported
+    LvxRetParamRebootEffect = 0x21,   // Parameters need to reboot to take effect
+    LvxRetParamRdOnly = 0x22,         // The parameter is read-only and cannot be written
+    LvxRetParamInvalidLen = 0x23, // The request parameter length is wrong, or the ack packet exceeds the maximum length
+    LvxRetParamKeyNumErr = 0x24,  // Parameter key_ num and key_ list mismatch
+    LvxRetUpgradePubKeyError = 0x30, // Public key signature verification error
+    LvxRetUpgradeDigestError = 0x31, // Digest check error
+    LvxRetUpgradeFwTypeError = 0x32, // Firmware type mismatch
+    LvxRetUpgradeFwOutOfRange = 0x33, // Firmware length out of range
+    LvxRetUpgradeFwErasing = 0x34, // Firmware erasing
 }
 
 #[derive(BinRead, BinWrite, Debug, Copy, Clone, PartialEq)]
@@ -159,7 +162,10 @@ impl BinRead for Data {
         args: Self::Args<'_>,
     ) -> binrw::BinResult<Self> {
         let (data_type, num_points) = args;
-        let args = VecArgs{count:num_points as usize,inner:()};
+        let args = VecArgs {
+            count: num_points as usize,
+            inner: (),
+        };
 
         match data_type {
             DataType::IMUData => {
@@ -181,7 +187,6 @@ impl BinRead for Data {
         }
     }
 }
-
 
 #[derive(BinRead, BinWrite, Debug)]
 #[brw(repr(u8))]
@@ -365,7 +370,7 @@ struct IMUData {
 }
 
 #[derive(Debug)]
-struct Point3D<T : num_traits::Num> {
+struct Point3D<T: num_traits::Num> {
     x: T,
     y: T,
     z: T,
@@ -399,7 +404,13 @@ where
         let z = T::read_options(reader, endian, ())?;
         let reflectivity = u8::read_options(reader, endian, ())?;
         let tag = u8::read_options(reader, endian, ())?;
-        Ok(Point3D { x, y, z, reflectivity, tag})
+        Ok(Point3D {
+            x,
+            y,
+            z,
+            reflectivity,
+            tag,
+        })
     }
 }
 
@@ -425,7 +436,7 @@ struct ControlCommandPacketHeader {
 #[brw(little)]
 struct ControlCommandParamConfigAck {
     ret_code: RetCode,
-    error_key: u16
+    error_key: u16,
 }
 
 #[binrw]
@@ -519,7 +530,10 @@ async fn handle_pointcloud_data(
 
     loop {
         let (len, addr) = socket_pointcloud_data.recv_from(&mut buf).await?;
-        println!("handle_pointcloud_data: Received {} bytes from {}", len, addr);
+        println!(
+            "handle_pointcloud_data: Received {} bytes from {}",
+            len, addr
+        );
 
         let mut cursor = Cursor::new(&buf[..len]);
         match LidarPacket::read(&mut cursor) {
@@ -531,9 +545,7 @@ async fn handle_pointcloud_data(
     }
 }
 
-async fn handle_any_data(
-    socket: tokio::net::UdpSocket,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn handle_any_data(socket: tokio::net::UdpSocket) -> Result<(), Box<dyn std::error::Error>> {
     let mut buf = vec![0; 1024];
 
     loop {
@@ -619,7 +631,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let addr_lidar_control_cmd: SocketAddr = "192.168.1.135:56100".parse()?;
 
-
     let addr_host_control_cmd: SocketAddr = "0.0.0.0:56101".parse()?;
     let addr_push_cmd: SocketAddr = "0.0.0.0:56201".parse()?;
     let addr_pointcloud_data: SocketAddr = "0.0.0.0:56301".parse()?;
@@ -652,7 +663,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let kv_list = KeyValueList::read(&mut cursor).unwrap();
         println!("{:?}", kv_list);
 
-        socket_host_control_cmd.send_to(&start_sampling, addr_lidar_control_cmd).await.unwrap();
+        socket_host_control_cmd
+            .send_to(&start_sampling, addr_lidar_control_cmd)
+            .await
+            .unwrap();
         handle_any_data(socket_host_control_cmd).await.unwrap();
     });
 
