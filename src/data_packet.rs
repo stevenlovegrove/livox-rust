@@ -1,25 +1,25 @@
 use crate::datatype::*;
 use binrw::{BinRead, BinWrite, VecArgs};
 
-#[derive(BinRead, Debug)]
+#[derive(BinRead, Debug, Clone)]
 #[brw(little)]
 pub struct LidarPacket {
-    version: u8,
-    length: u16,
-    time_interval: u16,
-    dot_num: u16,
-    udp_cnt: u16,
-    frame_cnt: u8,
-    data_type: DataType,
-    time_type: TimeType,
-    reserved: [u8; 12],
-    crc32: u32,
-    timestamp: u64,
+    pub version: u8,
+    pub length: u16,
+    pub time_interval: u16,
+    pub dot_num: u16,
+    pub udp_cnt: u16,
+    pub frame_cnt: u8,
+    pub data_type: DataType,
+    pub time_type: TimeType,
+    pub reserved: [u8; 12],
+    pub crc32: u32,
+    pub timestamp: u64,
     #[br(args(data_type, dot_num))]
-    data: Data,
+    pub data: Data,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Data {
     IMU(Vec<IMUData>),
     PointCloud1(Vec<Point3D<i32>>),
@@ -62,7 +62,7 @@ impl BinRead for Data {
     }
 }
 
-#[derive(BinRead, BinWrite, Debug)]
+#[derive(BinRead, BinWrite, Debug, Clone)]
 #[brw(little)]
 pub struct IMUData {
     gyro_x: f32,
@@ -73,23 +73,23 @@ pub struct IMUData {
     acc_z: f32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Point3D<T: num_traits::Num> {
-    x: T,
-    y: T,
-    z: T,
-    reflectivity: u8,
-    tag: u8,
+    pub x: T,
+    pub y: T,
+    pub z: T,
+    pub reflectivity: u8,
+    pub tag: u8,
 }
 
-#[derive(BinRead, BinWrite, Debug)]
+#[derive(BinRead, BinWrite, Debug, Clone)]
 #[brw(little)]
 pub struct Bearing {
-    depth: u32,
-    theta: u16,
-    phi: u16,
-    reflectivity: u8,
-    tag: u8,
+    pub depth: u32,
+    pub theta: u16,
+    pub phi: u16,
+    pub reflectivity: u8,
+    pub tag: u8,
 }
 
 impl<T: BinRead + num_traits::Num> BinRead for Point3D<T>

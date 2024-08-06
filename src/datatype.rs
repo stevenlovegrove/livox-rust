@@ -28,7 +28,7 @@ pub enum DataType {
     PointCloudData3 = 3,
 }
 
-#[derive(BinRead, BinWrite, Debug)]
+#[derive(BinRead, BinWrite, Debug, Clone)]
 #[brw(repr(u8))]
 pub enum TimeType {
     NoSync = 0,

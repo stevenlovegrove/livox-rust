@@ -6,11 +6,14 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+anyhow = "1.0.86"
 binrw = "0.14.0"
 crc = "3.2.1"
+ctrlc = "3.4.4"
 get_if_addrs = "0.5.3"
 num-traits = "0.2.19"
 pnet = "0.35.0"
 three-d = "0.17.0"
 three-d-asset = {version = "0.7",features = ["pcd", "http"] }
 tokio = {version = "1.39.2", features = ["full"]}
+tokio-util = "0.7.11"
