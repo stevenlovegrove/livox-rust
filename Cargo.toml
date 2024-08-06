@@ -9,5 +9,6 @@ edition = "2021"
 binrw = "0.14.0"
 crc = "3.2.1"
 get_if_addrs = "0.5.3"
+num-traits = "0.2.19"
 pnet = "0.35.0"
 tokio = {version = "1.39.2", features = ["full"]}

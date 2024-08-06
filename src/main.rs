@@ -1,4 +1,4 @@
-use binrw::{binrw, io::Cursor, meta::WriteEndian, BinRead, BinWrite};
+use binrw::{binrw, io::Cursor, meta::WriteEndian, BinRead, BinWrite, VecArgs};
 use crc::*;
 use get_if_addrs::get_if_addrs;
 use pnet::datalink::{self, NetworkInterface};
@@ -88,7 +88,7 @@ impl SerializedSize for KeyValue {
     }
 }
 
-#[derive(BinRead, BinWrite, Debug)]
+#[derive(BinRead, Debug)]
 #[brw(little)]
 struct LidarPacket {
     version: u8,
@@ -102,7 +102,7 @@ struct LidarPacket {
     reserved: [u8; 12],
     crc32: u32,
     timestamp: u64,
-    #[br(args(data_type))]
+    #[br(args(data_type, dot_num))]
     data: Data,
 }
 
@@ -142,18 +142,46 @@ enum TimeType {
     GPS = 2,
 }
 
-#[derive(BinRead, BinWrite, Debug)]
-#[br(import(data_type: DataType))]
+#[derive(Debug)]
 enum Data {
-    #[br(pre_assert(data_type == DataType::IMUData))]
-    IMU(IMUData),
-    #[br(pre_assert(data_type == DataType::PointCloudData1))]
-    PointCloud1(PointCloudData1),
-    #[br(pre_assert(data_type == DataType::PointCloudData2))]
-    PointCloud2(PointCloudData2),
-    #[br(pre_assert(data_type == DataType::PointCloudData3))]
-    PointCloud3(PointCloudData3),
+    IMU(Vec<IMUData>),
+    PointCloud1(Vec<Point3D<i32>>),
+    PointCloud2(Vec<Point3D<i16>>),
+    PointCloud3(Vec<Bearing>),
 }
+
+impl BinRead for Data {
+    type Args<'a> = (DataType, u16);
+
+    fn read_options<R: Read + std::io::Seek>(
+        reader: &mut R,
+        endian: binrw::Endian,
+        args: Self::Args<'_>,
+    ) -> binrw::BinResult<Self> {
+        let (data_type, num_points) = args;
+        let args = VecArgs{count:num_points as usize,inner:()};
+
+        match data_type {
+            DataType::IMUData => {
+                let data = Vec::<IMUData>::read_options(reader, endian, args)?;
+                Ok(Data::IMU(data))
+            }
+            DataType::PointCloudData1 => {
+                let data = Vec::<Point3D<i32>>::read_options(reader, endian, args)?;
+                Ok(Data::PointCloud1(data))
+            }
+            DataType::PointCloudData2 => {
+                let data = Vec::<Point3D<i16>>::read_options(reader, endian, args)?;
+                Ok(Data::PointCloud2(data))
+            }
+            DataType::PointCloudData3 => {
+                let data = Vec::<Bearing>::read_options(reader, endian, args)?;
+                Ok(Data::PointCloud3(data))
+            }
+        }
+    }
+}
+
 
 #[derive(BinRead, BinWrite, Debug)]
 #[brw(repr(u8))]
@@ -336,34 +364,43 @@ struct IMUData {
     acc_z: f32,
 }
 
-#[derive(BinRead, BinWrite, Debug)]
-#[brw(little)]
-struct PointCloudData1 {
-    x: i32,
-    y: i32,
-    z: i32,
+#[derive(Debug)]
+struct Point3D<T : num_traits::Num> {
+    x: T,
+    y: T,
+    z: T,
     reflectivity: u8,
     tag: u8,
 }
 
 #[derive(BinRead, BinWrite, Debug)]
 #[brw(little)]
-struct PointCloudData2 {
-    x: i16,
-    y: i16,
-    z: i16,
-    reflectivity: u8,
-    tag: u8,
-}
-
-#[derive(BinRead, BinWrite, Debug)]
-#[brw(little)]
-struct PointCloudData3 {
+struct Bearing {
     depth: u32,
     theta: u16,
     phi: u16,
     reflectivity: u8,
     tag: u8,
+}
+
+impl<T: BinRead + num_traits::Num> BinRead for Point3D<T>
+where
+    for<'a> T: BinRead<Args<'a> = ()>,
+{
+    type Args<'a> = ();
+
+    fn read_options<R: Read + std::io::Seek>(
+        reader: &mut R,
+        endian: binrw::Endian,
+        _args: Self::Args<'_>,
+    ) -> binrw::BinResult<Self> {
+        let x = T::read_options(reader, endian, ())?;
+        let y = T::read_options(reader, endian, ())?;
+        let z = T::read_options(reader, endian, ())?;
+        let reflectivity = u8::read_options(reader, endian, ())?;
+        let tag = u8::read_options(reader, endian, ())?;
+        Ok(Point3D { x, y, z, reflectivity, tag})
+    }
 }
 
 #[binrw]
@@ -478,7 +515,7 @@ async fn handle_push_cmd(
 async fn handle_pointcloud_data(
     socket_pointcloud_data: tokio::net::UdpSocket,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut buf = vec![0; 1024];
+    let mut buf = vec![0; 10240];
 
     loop {
         let (len, addr) = socket_pointcloud_data.recv_from(&mut buf).await?;
@@ -523,6 +560,7 @@ async fn make_config_packet() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
             items: vec![KeyValueItem {
                 key: Key::WorkTgtMode,
                 value: KeyValue::WorkTgtMode(WorkState::IDLE),
+                // value: KeyValue::WorkTgtMode(WorkState::Sampling),
             }],
         };
         list.write(&mut cursor)?;
