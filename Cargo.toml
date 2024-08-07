@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.86"
+async-std = "1.12.0"
 binrw = "0.14.0"
 crc = "3.2.1"
 ctrlc = "3.4.4"
