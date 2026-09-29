@@ -31,10 +31,10 @@ impl std::io::Seek for SizeCounter {
               self.pos = pos as usize;
           }
           std::io::SeekFrom::End(pos) => {
-              self.pos = self.max_size as usize + pos as usize;
+              self.pos = (self.max_size as i64 + pos) as usize;
           }
           std::io::SeekFrom::Current(pos) => {
-              self.pos = self.pos + pos as usize;
+              self.pos = (self.pos as i64 + pos) as usize;
           }
       }
       self.max_size = self.max_size.max(self.pos);

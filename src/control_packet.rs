@@ -26,8 +26,8 @@ pub struct ControlCommandPacket {
 
     pub crc16: u16,
     pub crc32: u32,
-    // #[br(count = header.length - 24)]
-    #[br(count = header.length - 24)]
+    // #[br(count = header.length.saturating_sub(24))]
+    #[br(count = header.length.saturating_sub(24))]
     pub data: Vec<u8>,
 }
 
@@ -51,8 +51,8 @@ pub enum SenderType {
 #[derive(Debug)]
 #[brw(little)]
 pub struct ControlCommandParamConfigAck {
-    ret_code: RetCode,
-    error_key: u16,
+    pub ret_code: RetCode,
+    pub error_key: u16,
 }
 
 #[binrw]

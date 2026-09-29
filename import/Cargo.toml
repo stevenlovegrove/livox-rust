@@ -1,0 +1,14 @@
+[package]
+name = "livox-import"
+version = "0.1.0"
+edition = "2021"
+description = "Converts recorded Livox datasets (ROS bags) to pcap recordings of the lidar's UDP stream"
+
+[[bin]]
+name = "bag2pcap"
+path = "src/main.rs"
+
+[dependencies]
+livox-rust = { path = ".." }
+anyhow = "1.0.86"
+rusqlite = { version = "0.40.2", features = ["bundled"] }

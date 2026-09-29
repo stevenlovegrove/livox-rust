@@ -3,7 +3,7 @@ use crate::key_size::SerializedSize;
 use binrw::binrw;
 
 #[binrw]
-#[derive(Debug, PartialEq, Copy, Clone)]
+#[derive(Debug, PartialEq, Copy, Clone, Default)]
 #[brw(repr(u16))]
 pub enum Key {
     PclDataType = 0x0000,
@@ -36,14 +36,10 @@ pub enum Key {
     LidarDiagStatus = 0x800E,
     FwType = 0x8010,
     HmsCode = 0x8011,
+    #[default]
     Unknown = 0xFFFF,
 }
 
-impl Default for Key {
-    fn default() -> Self {
-        Key::Unknown
-    }
-}
 
 #[binrw]
 #[derive(Debug)]

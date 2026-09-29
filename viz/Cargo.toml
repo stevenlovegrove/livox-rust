@@ -1,0 +1,13 @@
+[package]
+name = "livox-viz"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+livox-rust = { path = ".." }
+anyhow = "1.0.86"
+ctrlc = "3.4.4"
+pango-rs = { path = "../../pangolino/pango-rs", default-features = false, features = ["derive"] }
+pango-render = { path = "../../pangolino/pango-render" }
+pango-core = { path = "../../pangolino/pango-core" }
+nalgebra = "0.34"
