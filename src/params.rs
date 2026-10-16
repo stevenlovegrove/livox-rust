@@ -14,12 +14,45 @@ pub fn packet_set_params(seq_num: u32, params: KeyValueList) -> anyhow::Result<V
         params.write(&mut cursor)?;
         cursor.into_inner()
     };
+    packet_request(seq_num, CommandID::LidarParamInfoConfig, data)
+}
 
+/// Encodes a `LidarInquireInfo` request that reads `keys`.
+pub fn packet_query(seq_num: u32, keys: &[Key]) -> anyhow::Result<Vec<u8>> {
+    // key_num, reserved, then the keys.
+    let mut data = u16::try_from(keys.len())?.to_le_bytes().to_vec();
+    data.extend_from_slice(&[0, 0]);
+    for &key in keys {
+        data.extend_from_slice(&(key as u16).to_le_bytes());
+    }
+    packet_request(seq_num, CommandID::LidarInquireInfo, data)
+}
+
+/// Decodes a `LidarInquireInfo` ack body: (key, raw little-endian value).
+pub fn parse_query_ack(data: &[u8]) -> anyhow::Result<Vec<(u16, Vec<u8>)>> {
+    anyhow::ensure!(data.len() >= 3, "short query ack");
+    anyhow::ensure!(data[0] == 0, "lidar refused the query (ret_code {})", data[0]);
+    let count = u16::from_le_bytes([data[1], data[2]]) as usize;
+    let mut items = Vec::with_capacity(count);
+    let mut at = 3;
+    for _ in 0..count {
+        anyhow::ensure!(at + 4 <= data.len(), "truncated query ack");
+        let key = u16::from_le_bytes([data[at], data[at + 1]]);
+        let len = u16::from_le_bytes([data[at + 2], data[at + 3]]) as usize;
+        at += 4;
+        anyhow::ensure!(at + len <= data.len(), "truncated query ack");
+        items.push((key, data[at..at + len].to_vec()));
+        at += len;
+    }
+    Ok(items)
+}
+
+fn packet_request(seq_num: u32, cmd_id: CommandID, data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
     let mut cursor = Cursor::new(Vec::new());
     let header = ControlCommandPacketHeader {
         length: u16::try_from(24 + data.len())?,
         seq_num,
-        cmd_id: CommandID::LidarParamInfoConfig,
+        cmd_id,
         cmd_type: CommandType::Req,
         sender_type: SenderType::HostComputer,
     };
@@ -77,5 +110,16 @@ mod tests {
         assert_eq!(list.items.len(), 1);
         assert_eq!(list.items[0].key, Key::WorkTgtMode);
         assert_eq!(&bytes[28..], &[0x1A, 0x00, 0x01, 0x00, 0x01]);
+    }
+
+    #[test]
+    fn query_request_and_ack() {
+        let bytes = packet_query(3, &[Key::TimeSyncType, Key::TimeOffset]).unwrap();
+        assert_eq!(bytes.len(), 24 + 8);
+        assert_eq!(&bytes[24..], &[2, 0, 0, 0, 0x0C, 0x80, 0x0B, 0x80]);
+        let ack = [0, 2, 0, 0x0C, 0x80, 1, 0, 1, 0x0B, 0x80, 8, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
+        let items = parse_query_ack(&ack).unwrap();
+        assert_eq!(items, vec![(0x800C, vec![1]), (0x800B, vec![0xFF; 8])]);
+        assert!(parse_query_ack(&ack[..10]).is_err());
     }
 }

@@ -30,8 +30,8 @@ use crate::{
     control_packet::{CommandID, CommandType, ControlCommandPacket, ControlCommandParamConfigAck},
     data_packet::{self, Packet},
     datatype::{RetCode, WorkState},
-    key::KeyValueList,
-    params::{packet_set_params, params_imu_enable, params_work_mode},
+    key::{Key, KeyValueList},
+    params::{packet_query, packet_set_params, params_imu_enable, params_work_mode, parse_query_ack},
     pcap,
     rx_time::{self, RxClock},
 };
@@ -219,7 +219,38 @@ impl Device {
     pub fn set_params(&mut self, params: KeyValueList) -> anyhow::Result<()> {
         self.seq_num = self.seq_num.wrapping_add(1);
         let seq_num = self.seq_num;
-        self.cmd.send(&packet_set_params(seq_num, params)?)?;
+        let data = self.request(seq_num, CommandID::LidarParamInfoConfig, &packet_set_params(seq_num, params)?)?;
+        let ack = ControlCommandParamConfigAck::read(&mut Cursor::new(&data)).map_err(|e| anyhow!("malformed ack: {e}"))?;
+        if ack.ret_code != RetCode::LvxRetSuccess {
+            bail!("lidar rejected key 0x{:04X}: {:?}", ack.error_key, ack.ret_code);
+        }
+        Ok(())
+    }
+
+    /// Reads `keys` (raw little-endian values, in the lidar's order).
+    pub fn query(&mut self, keys: &[Key]) -> anyhow::Result<Vec<(u16, Vec<u8>)>> {
+        self.seq_num = self.seq_num.wrapping_add(1);
+        let seq_num = self.seq_num;
+        let data = self.request(seq_num, CommandID::LidarInquireInfo, &packet_query(seq_num, keys)?)?;
+        parse_query_ack(&data)
+    }
+
+    /// The lidar's own view of its time synchronisation.
+    pub fn time_sync(&mut self) -> anyhow::Result<TimeSync> {
+        let items = self.query(&[Key::TimeSyncType, Key::LocalTimeNow, Key::LastSyncTime, Key::TimeOffset])?;
+        let get = |key: Key| items.iter().find(|(k, _)| *k == key as u16).map(|(_, v)| v.as_slice());
+        let u64_of = |key: Key| get(key).and_then(|v| v.try_into().ok()).map(u64::from_le_bytes);
+        Ok(TimeSync {
+            sync_type: get(Key::TimeSyncType).and_then(|v| v.first().copied()),
+            local_time_ns: u64_of(Key::LocalTimeNow),
+            last_sync_time_ns: u64_of(Key::LastSyncTime),
+            offset_ns: u64_of(Key::TimeOffset).map(|v| v as i64),
+        })
+    }
+
+    /// Sends a command and waits for its ack; returns the ack's body.
+    fn request(&mut self, seq_num: u32, cmd_id: CommandID, packet: &[u8]) -> anyhow::Result<Vec<u8>> {
+        self.cmd.send(packet)?;
 
         let deadline = Instant::now() + self.cfg.ack_timeout;
         let mut buf = [0u8; 1500];
@@ -229,22 +260,14 @@ impl Device {
                 Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => break,
                 Err(e) => return Err(e).context("waiting for ack"),
             };
-            let Ok(packet) = ControlCommandPacket::read(&mut Cursor::new(&buf[..len])) else {
+            let Ok(reply) = ControlCommandPacket::read(&mut Cursor::new(&buf[..len])) else {
                 continue;
             };
-            let h = &packet.header;
-            if h.seq_num != seq_num
-                || !matches!(h.cmd_type, CommandType::Ack)
-                || !matches!(h.cmd_id, CommandID::LidarParamInfoConfig)
-            {
+            let h = &reply.header;
+            if h.seq_num != seq_num || !matches!(h.cmd_type, CommandType::Ack) || std::mem::discriminant(&h.cmd_id) != std::mem::discriminant(&cmd_id) {
                 continue;
             }
-            let ack = ControlCommandParamConfigAck::read(&mut Cursor::new(&packet.data))
-                .map_err(|e| anyhow!("malformed ack: {e}"))?;
-            if ack.ret_code != RetCode::LvxRetSuccess {
-                bail!("lidar rejected key 0x{:04X}: {:?}", ack.error_key, ack.ret_code);
-            }
-            return Ok(());
+            return Ok(reply.data);
         }
         // Which local address the OS would use to reach the lidar: if it is on
         // another subnet, the lidar's link is down or has no address.
@@ -261,6 +284,18 @@ impl Device {
             self.cfg.ack_timeout
         )
     }
+}
+
+/// Time synchronisation as the lidar reports it (keys 0x800C, 0x8009,
+/// 0x800A, 0x800B). For PTP, `last_sync_time_ns` is the master time in the
+/// last Follow_Up the lidar used, and `offset_ns` its local minus master time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeSync {
+    /// 0 none, 1 PTP/gPTP, 2 GPS.
+    pub sync_type: Option<u8>,
+    pub local_time_ns: Option<u64>,
+    pub last_sync_time_ns: Option<u64>,
+    pub offset_ns: Option<i64>,
 }
 
 impl Drop for Device {
