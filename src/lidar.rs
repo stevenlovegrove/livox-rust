@@ -1,6 +1,11 @@
 //! A Livox SDK2 device (e.g. Mid-360): control over UDP, plus one receive
 //! thread per data stream (point cloud, IMU) that decodes packets and hands
 //! them to the caller over a bounded channel.
+//!
+//! Each datagram's host receive time is the kernel's timestamp where the OS
+//! provides one (Linux), else read just after `recv` (see `rx_time`). It is
+//! what a recording stores as the capture time, and what
+//! [`Device::open_timed`] hands over with each packet.
 
 use std::{
     io::{Cursor, ErrorKind},
@@ -14,7 +19,7 @@ use std::{
         Arc, Mutex,
     },
     thread::JoinHandle,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, bail, Context};
@@ -28,6 +33,7 @@ use crate::{
     key::KeyValueList,
     params::{packet_set_params, params_imu_enable, params_work_mode},
     pcap,
+    rx_time::{self, RxClock},
 };
 
 type Recorder = Arc<Mutex<pcap::Writer<BufWriter<File>>>>;
@@ -91,6 +97,35 @@ pub struct Stats {
     pub imu: StreamStats,
 }
 
+/// A packet and when the host received it.
+#[derive(Debug)]
+pub struct Received {
+    pub packet: Packet,
+    /// Host receive time, ns since the Unix epoch (CLOCK_REALTIME).
+    pub host_ns: u64,
+    /// Whether `host_ns` is the kernel's timestamp or read after `recv`.
+    pub clock: RxClock,
+}
+
+/// Where the receive threads send packets.
+#[derive(Clone)]
+enum Sink {
+    Plain(SyncSender<Packet>),
+    Timed(SyncSender<Received>),
+}
+
+impl Sink {
+    /// Hands over a packet; false if the channel was full (it is dropped).
+    fn send(&self, packet: Packet, host_ns: u64, clock: RxClock) -> bool {
+        let result = match self {
+            Sink::Plain(tx) => tx.try_send(packet).map_err(|e| matches!(e, TrySendError::Full(_))),
+            Sink::Timed(tx) => tx.try_send(Received { packet, host_ns, clock }).map_err(|e| matches!(e, TrySendError::Full(_))),
+        };
+        // Disconnected: nobody is listening; keep draining the socket until shutdown.
+        !matches!(result, Err(true))
+    }
+}
+
 pub struct Device {
     cfg: Config,
     cmd: UdpSocket,
@@ -106,12 +141,22 @@ impl Device {
     /// Binds the sockets and starts the receive threads. Packets arrive on the
     /// returned channel once the lidar is sampling (see `start`).
     pub fn open(cfg: Config) -> anyhow::Result<(Self, Receiver<Packet>)> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(cfg.queue_packets);
+        Ok((Self::open_with(cfg, Sink::Plain(tx))?, rx))
+    }
+
+    /// As [`open`](Self::open), with each packet's host receive time.
+    pub fn open_timed(cfg: Config) -> anyhow::Result<(Self, Receiver<Received>)> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(cfg.queue_packets);
+        Ok((Self::open_with(cfg, Sink::Timed(tx))?, rx))
+    }
+
+    fn open_with(cfg: Config, sink: Sink) -> anyhow::Result<Self> {
         let cmd = UdpSocket::bind(SocketAddrV4::new(cfg.host_ip, cfg.host_cmd_port))
             .context("binding control socket")?;
         cmd.connect(SocketAddrV4::new(cfg.lidar_ip, cfg.lidar_cmd_port))?;
         cmd.set_read_timeout(Some(cfg.ack_timeout))?;
 
-        let (tx, rx) = std::sync::mpsc::sync_channel(cfg.queue_packets);
         let running = Arc::new(AtomicBool::new(true));
         let stats = Arc::new(Stats::default());
         let recorder = match &cfg.record {
@@ -125,10 +170,12 @@ impl Device {
         for (port, name) in [(cfg.host_point_port, "livox-points"), (cfg.host_imu_port, "livox-imu")] {
             let socket = bind_data_socket(SocketAddrV4::new(cfg.host_ip, port), cfg.recv_buffer_bytes)
                 .with_context(|| format!("binding {name} socket on port {port}"))?;
+            let clock = rx_time::enable(&socket);
             let ctx = RecvContext {
                 socket,
+                clock,
                 lidar_ip: cfg.lidar_ip,
-                tx: tx.clone(),
+                tx: sink.clone(),
                 running: running.clone(),
                 stats: stats.clone(),
                 recorder: recorder.clone(),
@@ -146,7 +193,7 @@ impl Device {
             threads,
             recorder,
         };
-        Ok((device, rx))
+        Ok(device)
     }
 
     /// Enables the IMU stream and starts sampling.
@@ -261,8 +308,9 @@ fn bind_data_socket(addr: SocketAddrV4, recv_buffer_bytes: usize) -> anyhow::Res
 
 struct RecvContext {
     socket: UdpSocket,
+    clock: RxClock,
     lidar_ip: Ipv4Addr,
-    tx: SyncSender<Packet>,
+    tx: Sink,
     running: Arc<AtomicBool>,
     stats: Arc<Stats>,
     recorder: Option<Recorder>,
@@ -278,7 +326,7 @@ impl RecvContext {
         let mut buf = vec![0u8; 65536];
         let mut last_cnt: Option<(u8, u16)> = None;
         while self.running.load(Relaxed) {
-            let (len, from) = match self.socket.recv_from(&mut buf) {
+            let (len, from, host_ns) = match rx_time::recv(&self.socket, &mut buf) {
                 Ok(r) => r,
                 Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => continue,
                 Err(e) => {
@@ -293,8 +341,7 @@ impl RecvContext {
             }
             let buf = &buf[..len];
             if let Some(r) = &recorder {
-                let now_ns = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as u64;
-                let result = r.lock().unwrap().write(now_ns, from, local, buf);
+                let result = r.lock().unwrap().write(host_ns, from, local, buf);
                 if let Err(e) = result {
                     eprintln!("livox: recording stopped: {e}");
                     recorder = None;
@@ -328,13 +375,8 @@ impl RecvContext {
             }
             last_cnt = Some(cnt);
 
-            match self.tx.try_send(packet) {
-                Ok(()) => {}
-                Err(TrySendError::Full(_)) => {
-                    stats.dropped.fetch_add(1, Relaxed);
-                }
-                // Nobody is listening; keep draining the socket until shutdown.
-                Err(TrySendError::Disconnected(_)) => {}
+            if !self.tx.send(packet, host_ns, self.clock) {
+                stats.dropped.fetch_add(1, Relaxed);
             }
         }
     }

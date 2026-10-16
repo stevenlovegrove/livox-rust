@@ -8,6 +8,7 @@ anyhow = "1.0.86"
 binrw = "0.14.0"
 crc = "3.2.1"
 socket2 = "0.5"
+libc = "0.2"
 
 [dev-dependencies]
 ctrlc = "3.4.4"
