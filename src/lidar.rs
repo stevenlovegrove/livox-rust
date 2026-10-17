@@ -83,7 +83,6 @@ pub struct StreamStats {
     pub packets: AtomicU64,
     pub points: AtomicU64,
     pub parse_errors: AtomicU64,
-    pub crc_errors: AtomicU64,
     /// Packets whose `udp_cnt` did not follow the previous one: packets were
     /// lost on the wire or in the socket buffer.
     pub seq_gaps: AtomicU64,
@@ -397,9 +396,6 @@ impl RecvContext {
             };
             stats.packets.fetch_add(1, Relaxed);
             stats.points.fetch_add(header.dot_num as u64, Relaxed);
-            if !data_packet::crc_ok(buf, header) {
-                stats.crc_errors.fetch_add(1, Relaxed);
-            }
             // udp_cnt counts packets; it may also restart at 0 when a new frame starts.
             let cnt = (header.frame_cnt, header.udp_cnt);
             if let Some((frame, udp)) = last_cnt {

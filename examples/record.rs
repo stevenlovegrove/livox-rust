@@ -60,10 +60,9 @@ fn main() -> anyhow::Result<()> {
             last_report = Instant::now();
             let s = device.stats();
             println!(
-                "{:6.1} s  {points} points  {imu} imu  | lidar gaps {} crc {} | imu gaps {}",
+                "{:6.1} s  {points} points  {imu} imu  | lidar gaps {} | imu gaps {}",
                 start.elapsed().as_secs_f64(),
                 s.points.seq_gaps.load(Relaxed),
-                s.points.crc_errors.load(Relaxed),
                 s.imu.seq_gaps.load(Relaxed),
             );
         }

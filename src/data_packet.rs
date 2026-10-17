@@ -177,7 +177,10 @@ impl PacketHeader {
     }
 }
 
-/// Checks the header's crc32, which covers the timestamp and payload.
+/// Checks the header's crc32, which the SDK2 protocol defines over the
+/// timestamp and payload. Not checked on receipt: a Mid-360 leaves it 0 on
+/// point packets and matches it on only a few percent of IMU packets, and
+/// UDP's own checksum already guards each datagram.
 pub fn crc_ok(buf: &[u8], header: &PacketHeader) -> bool {
     CRC_DATA.checksum(&buf[CRC_START..]) == header.crc32
 }
