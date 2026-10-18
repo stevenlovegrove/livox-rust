@@ -13,5 +13,5 @@ mod crc;
 mod key_size;
 
 pub use data_packet::{ImuSample, Packet, Point, PointPacket};
-pub use lidar::{Config, Device, Received, Stats, TimeSync};
+pub use lidar::{Config, DatagramSink, Device, Received, Stats, TimeSync};
 pub use rx_time::RxClock;

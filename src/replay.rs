@@ -1,4 +1,5 @@
-//! Replays a pcap recording as a lidar on loopback, so a `Device` opened with
+//! Replays a pcap recording (or any source of datagrams, `spawn_from`) as a
+//! lidar on loopback, so a `Device` opened with
 //! `Config::new(Ipv4Addr::LOCALHOST)` receives it exactly as it would a live
 //! sensor: same sockets, same decoding, same channel.
 //!
@@ -13,7 +14,7 @@
 
 use std::{
     net::{Ipv4Addr, SocketAddrV4, UdpSocket},
-    path::{Path, PathBuf},
+    path::Path,
     sync::{
         atomic::{AtomicBool, Ordering::Relaxed},
         Arc,
@@ -63,9 +64,27 @@ impl ReplayLidar {
     /// Serves the lidar side of `cfg`'s ports on 127.0.0.1 from `path`.
     pub fn spawn(cfg: &Config, path: impl AsRef<Path>, opts: ReplayOptions) -> anyhow::Result<Self> {
         let path = path.as_ref().to_path_buf();
-        anyhow::ensure!(opts.speed > 0.0 && opts.speed.is_finite(), "speed must be positive");
         // Fail now, not in the thread, if the file is unreadable.
         pcap::Reader::open(&path).with_context(|| format!("opening {}", path.display()))?;
+        Self::spawn_from(
+            cfg,
+            move || -> anyhow::Result<Datagrams> {
+                let reader = pcap::Reader::open(&path).with_context(|| format!("opening {}", path.display()))?;
+                Ok(Box::new(reader.map(|d| d.map_err(anyhow::Error::from))))
+            },
+            opts,
+        )
+    }
+
+    /// As `spawn`, from the datagrams `open` returns, in recorded order
+    /// (called again for each loop). Each datagram goes to the host port of
+    /// its stream, read from its header, whatever its recorded `dst`.
+    pub fn spawn_from(
+        cfg: &Config,
+        open: impl Fn() -> anyhow::Result<Datagrams> + Send + 'static,
+        opts: ReplayOptions,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(opts.speed > 0.0 && opts.speed.is_finite(), "speed must be positive");
 
         let cmd = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, cfg.lidar_cmd_port))
             .context("binding replay control socket")?;
@@ -84,7 +103,7 @@ impl ReplayLidar {
 
         let stream = std::thread::spawn({
             let player = Player {
-                path,
+                open: Box::new(open),
                 opts,
                 socket: data,
                 point_dst: SocketAddrV4::new(Ipv4Addr::LOCALHOST, cfg.host_point_port),
@@ -123,8 +142,11 @@ impl Drop for ReplayLidar {
     }
 }
 
+/// Datagrams to replay, in recorded order.
+pub type Datagrams = Box<dyn Iterator<Item = anyhow::Result<Datagram>> + Send>;
+
 struct Player {
-    path: PathBuf,
+    open: Box<dyn Fn() -> anyhow::Result<Datagrams> + Send>,
     opts: ReplayOptions,
     socket: UdpSocket,
     point_dst: SocketAddrV4,
@@ -144,7 +166,7 @@ impl Player {
 
     /// Plays the file through once. Returns false if stopped early.
     fn play_once(&self) -> anyhow::Result<bool> {
-        let reader = pcap::Reader::open(&self.path)?;
+        let reader = (self.open)()?;
         // Maps a recording time to the wall-clock instant it is due.
         let mut clock: Option<(u64, Instant)> = None;
         for datagram in reader {

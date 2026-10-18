@@ -85,3 +85,53 @@ fn replayed_recording_matches_live_stream() {
     }
     let _ = std::fs::remove_dir_all(Path::new(&dir));
 }
+
+#[test]
+fn datagrams_handed_to_a_sink_replay_like_the_live_stream() {
+    use std::sync::{Arc, Mutex};
+    // Off this file's other test's ports too.
+    let config = || {
+        let mut cfg = config();
+        cfg.lidar_cmd_port += 1000;
+        cfg.host_cmd_port += 1000;
+        cfg.host_point_port += 1000;
+        cfg.host_imu_port += 1000;
+        cfg
+    };
+    let sunk: Arc<Mutex<Vec<pcap::Datagram>>> = Arc::default();
+    let live = {
+        let mut cfg = config();
+        let to = sunk.clone();
+        cfg.record_sink = Some(livox_rust::DatagramSink(Arc::new(move |capture_ns, src, dst, payload: &[u8]| {
+            to.lock().unwrap().push(pcap::Datagram { capture_ns, src, dst, payload: payload.to_vec() });
+        })));
+        let _lidar = FakeLidar::spawn(&cfg).unwrap();
+        let (mut device, rx) = Device::open(cfg).unwrap();
+        device.start().unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        device.stop().unwrap();
+        collect_while(&rx, || false)
+    };
+    let sunk = std::mem::take(&mut *sunk.lock().unwrap());
+    assert_eq!(sunk.len(), live.len());
+    // The two receive threads interleave: replay in time order.
+    let mut ordered = sunk;
+    ordered.sort_by_key(|d| d.capture_ns);
+
+    let cfg = config();
+    let replay = ReplayLidar::spawn_from(
+        &cfg,
+        move || -> anyhow::Result<livox_rust::replay::Datagrams> { Ok(Box::new(ordered.clone().into_iter().map(Ok))) },
+        ReplayOptions { speed: 4.0, ..Default::default() },
+    )
+    .unwrap();
+    let (mut device, rx) = Device::open(cfg).unwrap();
+    device.start().unwrap();
+    let replayed = collect_while(&rx, || !replay.finished());
+    for imu in [false, true] {
+        let pick = |v: &[Packet]| -> Vec<_> {
+            v.iter().filter(|p| matches!(p, Packet::Imu { .. }) == imu).map(key).collect()
+        };
+        assert_eq!(pick(&replayed), pick(&live), "imu stream: {imu}");
+    }
+}

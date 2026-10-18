@@ -38,6 +38,20 @@ use crate::{
 
 type Recorder = Arc<Mutex<pcap::Writer<BufWriter<File>>>>;
 
+/// Where to hand every datagram from the lidar as it arrives, before it is
+/// parsed (`Config::record_sink`): its host receive time (ns since the Unix
+/// epoch, as `Received::host_ns`), the lidar's address, the local address
+/// it arrived on, and its bytes. Called on the receive threads, so it
+/// should be quick (queue the bytes, say).
+#[derive(Clone)]
+pub struct DatagramSink(pub Arc<dyn Fn(u64, SocketAddrV4, SocketAddrV4, &[u8]) + Send + Sync>);
+
+impl std::fmt::Debug for DatagramSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DatagramSink")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub lidar_ip: Ipv4Addr,
@@ -57,6 +71,9 @@ pub struct Config {
     /// Record every datagram from the lidar, as received, to this pcap file
     /// (replay it with `replay::ReplayLidar`).
     pub record: Option<PathBuf>,
+    /// Hand every datagram from the lidar, as received, to this (to record
+    /// it some other way than as pcap).
+    pub record_sink: Option<DatagramSink>,
 }
 
 impl Config {
@@ -73,6 +90,7 @@ impl Config {
             queue_packets: 16384,
             ack_timeout: Duration::from_secs(1),
             record: None,
+            record_sink: None,
         }
     }
 }
@@ -178,6 +196,7 @@ impl Device {
                 running: running.clone(),
                 stats: stats.clone(),
                 recorder: recorder.clone(),
+                sink: cfg.record_sink.clone(),
             };
             threads.push(std::thread::Builder::new().name(name.into()).spawn(move || ctx.run())?);
         }
@@ -348,6 +367,7 @@ struct RecvContext {
     running: Arc<AtomicBool>,
     stats: Arc<Stats>,
     recorder: Option<Recorder>,
+    sink: Option<DatagramSink>,
 }
 
 impl RecvContext {
@@ -380,6 +400,9 @@ impl RecvContext {
                     eprintln!("livox: recording stopped: {e}");
                     recorder = None;
                 }
+            }
+            if let Some(sink) = &self.sink {
+                (sink.0)(host_ns, from, local, buf);
             }
             let packet = match data_packet::parse(buf) {
                 Ok(p) => p,
