@@ -29,9 +29,9 @@ use socket2::{Domain, Protocol, Socket, Type};
 use crate::{
     control_packet::{CommandID, CommandType, ControlCommandPacket, ControlCommandParamConfigAck},
     data_packet::{self, Packet},
-    datatype::{RetCode, WorkState},
+    datatype::{ImuRate, ImuSensorCfg, RetCode, WorkState},
     key::{Key, KeyValueList},
-    params::{packet_query, packet_set_params, params_imu_enable, params_work_mode, parse_query_ack},
+    params::{packet_query, packet_set_params, params_imu_enable, params_imu_sensor_cfg, params_work_mode, parse_query_ack},
     pcap,
     rx_time::{self, RxClock},
 };
@@ -74,6 +74,9 @@ pub struct Config {
     /// Hand every datagram from the lidar, as received, to this (to record
     /// it some other way than as pcap).
     pub record_sink: Option<DatagramSink>,
+    /// The IMU output rate `start` sets (`Device::set_imu_rate`); None
+    /// leaves the lidar's as it is.
+    pub imu_rate: Option<ImuRate>,
 }
 
 impl Config {
@@ -91,6 +94,7 @@ impl Config {
             ack_timeout: Duration::from_secs(1),
             record: None,
             record_sink: None,
+            imu_rate: None,
         }
     }
 }
@@ -214,8 +218,12 @@ impl Device {
         Ok(device)
     }
 
-    /// Enables the IMU stream and starts sampling.
+    /// Sets the IMU rate (if `Config::imu_rate`), enables the IMU stream and
+    /// starts sampling.
     pub fn start(&mut self) -> anyhow::Result<()> {
+        if let Some(rate) = self.cfg.imu_rate {
+            self.set_imu_rate(rate)?;
+        }
         self.set_params(params_imu_enable(true))?;
         self.set_params(params_work_mode(WorkState::Sampling))?;
         self.sampling = true;
@@ -251,6 +259,39 @@ impl Device {
         let seq_num = self.seq_num;
         let data = self.request(seq_num, CommandID::LidarInquireInfo, &packet_query(seq_num, keys)?)?;
         parse_query_ack(&data)
+    }
+
+    /// The IMU's output rate and ranges (key 0x002B); None if the lidar
+    /// doesn't report them (firmware without the key).
+    pub fn imu_sensor_cfg(&mut self) -> anyhow::Result<Option<ImuSensorCfg>> {
+        self.seq_num = self.seq_num.wrapping_add(1);
+        let seq_num = self.seq_num;
+        let data = self.request(seq_num, CommandID::LidarInquireInfo, &packet_query(seq_num, &[Key::ImuSensorCfg])?)?;
+        // A lidar that doesn't know the key refuses the query.
+        if data.first().is_some_and(|&ret| ret != 0) {
+            return Ok(None);
+        }
+        let items = parse_query_ack(&data)?;
+        let Some((_, value)) = items.iter().find(|(k, _)| *k == Key::ImuSensorCfg as u16) else { return Ok(None) };
+        anyhow::ensure!(value.len() == 3, "imu_sensor_cfg is {} bytes, not 3", value.len());
+        Ok(Some(ImuSensorCfg { output_rate: value[0], accel_range: value[1], gyro_range: value[2] }))
+    }
+
+    /// Sets the IMU's output rate, keeping its ranges as the lidar reports
+    /// them (the key sets all three); returns the configuration now. A
+    /// lidar that doesn't report the key runs at 200 Hz only: asking it for
+    /// that is no change (None), any other rate an error.
+    pub fn set_imu_rate(&mut self, rate: ImuRate) -> anyhow::Result<Option<ImuSensorCfg>> {
+        let Some(now) = self.imu_sensor_cfg()? else {
+            anyhow::ensure!(rate == ImuRate::Hz200, "the lidar doesn't report its IMU configuration (key 0x002B), so can't be set to {} Hz", rate.hz());
+            return Ok(None);
+        };
+        if now.output_rate == rate.code() {
+            return Ok(Some(now));
+        }
+        let cfg = ImuSensorCfg { output_rate: rate.code(), ..now };
+        self.set_params(params_imu_sensor_cfg(cfg))?;
+        Ok(Some(cfg))
     }
 
     /// The lidar's own view of its time synchronisation.

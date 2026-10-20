@@ -71,3 +71,74 @@ pub enum WorkState {
     Upgrade = 0x8,
     Ready = 0x9,
 }
+
+/// The IMU's output rate and ranges (key 0x002B, `imu_sensor_cfg`), as the
+/// lidar's codes: see [`ImuRate`] for `output_rate`; `accel_range` 0..=3 is
+/// ±4, 8, 16, 32 g; `gyro_range` 0..=7 is ±2000 dps halving down to ±15.625.
+/// The decoded samples are in rad/s and g whatever the ranges.
+#[derive(BinRead, BinWrite, Debug, Copy, Clone, PartialEq, Eq)]
+#[brw(little)]
+pub struct ImuSensorCfg {
+    pub output_rate: u8,
+    pub accel_range: u8,
+    pub gyro_range: u8,
+}
+
+impl ImuSensorCfg {
+    /// The output rate, if its code is one the protocol documents.
+    pub fn rate(&self) -> Option<ImuRate> {
+        ImuRate::from_code(self.output_rate)
+    }
+
+    /// The accelerometer's full scale, ±g.
+    pub fn accel_range_g(&self) -> Option<f64> {
+        (self.accel_range <= 3).then(|| 4.0 * f64::from(1u8 << self.accel_range))
+    }
+
+    /// The gyro's full scale, ±deg/s.
+    pub fn gyro_range_dps(&self) -> Option<f64> {
+        (self.gyro_range <= 7).then(|| 2000.0 / f64::from(1u8 << self.gyro_range))
+    }
+}
+
+/// The IMU's output rates (`imu_sensor_cfg`'s `output_rate`). 200 Hz is
+/// what the lidar runs at unless told otherwise.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
+pub enum ImuRate {
+    Hz50,
+    Hz100,
+    #[default]
+    Hz200,
+    Hz500,
+}
+
+impl ImuRate {
+    pub const ALL: [ImuRate; 4] = [ImuRate::Hz50, ImuRate::Hz100, ImuRate::Hz200, ImuRate::Hz500];
+
+    /// The protocol's code for the rate (not in order of rate).
+    pub fn code(self) -> u8 {
+        match self {
+            ImuRate::Hz200 => 0,
+            ImuRate::Hz500 => 1,
+            ImuRate::Hz100 => 2,
+            ImuRate::Hz50 => 3,
+        }
+    }
+
+    pub fn from_code(code: u8) -> Option<Self> {
+        Self::ALL.into_iter().find(|r| r.code() == code)
+    }
+
+    pub fn hz(self) -> u32 {
+        match self {
+            ImuRate::Hz50 => 50,
+            ImuRate::Hz100 => 100,
+            ImuRate::Hz200 => 200,
+            ImuRate::Hz500 => 500,
+        }
+    }
+
+    pub fn from_hz(hz: u32) -> Option<Self> {
+        Self::ALL.into_iter().find(|r| r.hz() == hz)
+    }
+}

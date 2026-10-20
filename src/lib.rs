@@ -12,6 +12,7 @@ pub mod source;
 mod crc;
 mod key_size;
 
+pub use datatype::{ImuRate, ImuSensorCfg};
 pub use data_packet::{ImuSample, Packet, Point, PointPacket};
 pub use lidar::{Config, DatagramSink, Device, Received, Stats, TimeSync};
 pub use rx_time::RxClock;

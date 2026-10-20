@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use livox_rust::{sim::FakeLidar, Config, Device, Packet};
+use livox_rust::{sim::FakeLidar, Config, Device, ImuRate, Packet};
 
 #[test]
 fn streams_points_and_imu_from_fake_lidar() {
@@ -47,5 +47,36 @@ fn streams_points_and_imu_from_fake_lidar() {
     assert_eq!(s.points.parse_errors.load(Relaxed), 0);
     assert_eq!(s.points.seq_gaps.load(Relaxed), 0);
     assert_eq!(s.imu.seq_gaps.load(Relaxed), 0);
+    device.stop().unwrap();
+}
+
+#[test]
+fn sets_the_imu_rate_keeping_its_ranges() {
+    let mut cfg = Config::new(Ipv4Addr::LOCALHOST);
+    cfg.host_ip = Ipv4Addr::LOCALHOST;
+    for port in [&mut cfg.lidar_cmd_port, &mut cfg.host_cmd_port, &mut cfg.host_point_port, &mut cfg.host_imu_port] {
+        *port += 2000;
+    }
+    cfg.imu_rate = Some(ImuRate::Hz500);
+
+    let _lidar = FakeLidar::spawn(&cfg).unwrap();
+    let (mut device, rx) = Device::open(cfg).unwrap();
+    let before = device.imu_sensor_cfg().unwrap().unwrap();
+    assert_eq!(before.rate(), Some(ImuRate::Hz200));
+    device.start().unwrap();
+    let after = device.imu_sensor_cfg().unwrap().unwrap();
+    assert_eq!(after.rate(), Some(ImuRate::Hz500));
+    assert_eq!((after.accel_range, after.gyro_range), (before.accel_range, before.gyro_range), "ranges kept");
+
+    // Count IMU samples over a second, after a moment to settle.
+    std::thread::sleep(Duration::from_millis(100));
+    while rx.try_recv().is_ok() {}
+    let (mut imu, end) = (0usize, Instant::now() + Duration::from_secs(1));
+    while Instant::now() < end {
+        if let Ok(Packet::Imu { .. }) = rx.recv_timeout(Duration::from_millis(50)) {
+            imu += 1;
+        }
+    }
+    assert!((450..=550).contains(&imu), "{imu} IMU samples in 1 s at 500 Hz");
     device.stop().unwrap();
 }

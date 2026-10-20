@@ -57,6 +57,15 @@ parse errors, sequence gaps (packets lost before they reached us) and drops
 ports (Mid-360 defaults), the socket buffer size and an optional recording
 path.
 
+The IMU runs at 200 Hz unless told otherwise. Set `Config::imu_rate`
+(`ImuRate::Hz50`, `Hz100`, `Hz200`, `Hz500`) and `start` sets that rate
+first. It writes key 0x002B (`imu_sensor_cfg`), which carries the output
+rate together with the accelerometer and gyro ranges, so the driver reads
+the lidar's current value and changes only the rate.
+`device.set_imu_rate(rate)` does the same at any time, and
+`device.imu_sensor_cfg()` reads the value back. A lidar that doesn't report
+the key is taken to run at 200 Hz only.
+
 ### Network setup
 
 The lidar sends its data to the host IP stored in its own configuration

@@ -20,6 +20,7 @@ pub enum Key {
     FuncIoCfg = 0x0019,
     WorkTgtMode = 0x001A,
     ImuDataEnable = 0x001C,
+    ImuSensorCfg = 0x002B,
     Sn = 0x8000,
     ProductInfo = 0x8001,
     VersionApp = 0x8002,
@@ -74,6 +75,8 @@ pub enum KeyValue {
     WorkTgtMode(WorkState),
     #[br(pre_assert(key == Key::ImuDataEnable))]
     ImuDataEnable(u8),
+    #[br(pre_assert(key == Key::ImuSensorCfg))]
+    ImuSensorCfg(ImuSensorCfg),
     #[br(pre_assert(key == Key::Sn))]
     Sn([u8; 16]),
     #[br(pre_assert(key == Key::ProductInfo))]

@@ -17,7 +17,7 @@ use std::{
     path::Path,
     sync::{
         atomic::{AtomicBool, Ordering::Relaxed},
-        Arc,
+        Arc, Mutex,
     },
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -30,7 +30,7 @@ use crate::{
     datatype::DataType,
     lidar::Config,
     pcap::{self, Datagram},
-    sim::serve_control,
+    sim::{serve_control, SIM_IMU_CFG},
 };
 
 #[derive(Debug, Clone)]
@@ -98,7 +98,8 @@ impl ReplayLidar {
         let control = std::thread::spawn({
             let running = running.clone();
             let sampling = sampling.clone();
-            move || serve_control(cmd, &running, &sampling)
+            // Replays at the recorded rate whatever the host sets.
+            move || serve_control(cmd, &running, &sampling, &Mutex::new(SIM_IMU_CFG))
         });
 
         let stream = std::thread::spawn({

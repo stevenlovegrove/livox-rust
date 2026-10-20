@@ -1,13 +1,15 @@
 //! A fake lidar on loopback, for running the driver and viewers without
-//! hardware. It acknowledges parameter writes and, while sampling, streams a
-//! Mid-360-like scan of a box-shaped room plus 200 Hz IMU packets.
+//! hardware. It acknowledges parameter writes, answers queries of its IMU
+//! configuration (key 0x002B) and, while sampling, streams a Mid-360-like
+//! scan of a box-shaped room plus IMU packets at the rate it was set to
+//! (200 Hz to begin with).
 
 use std::{
     io::Cursor,
     net::{Ipv4Addr, SocketAddrV4, UdpSocket},
     sync::{
         atomic::{AtomicBool, Ordering::Relaxed},
-        Arc,
+        Arc, Mutex,
     },
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -19,14 +21,16 @@ use crate::{
     control_packet::*,
     crc::{CRC_DATA, CRC_HEADER},
     data_packet::{encode_imu, encode_points, EncodeHeader, ImuSample, Point},
-    datatype::{RetCode, WorkState},
-    key::{KeyValue, KeyValueList},
+    datatype::{ImuSensorCfg, RetCode, WorkState},
+    key::{Key, KeyValue, KeyValueList},
     lidar::Config,
 };
 
 const POINTS_PER_PACKET: usize = 96;
 const POINT_RATE_HZ: f64 = 200_000.0;
-const IMU_RATE_HZ: f64 = 200.0;
+/// What the simulator starts with: 200 Hz; the ranges are a guess (the
+/// protocol documents no defaults).
+pub const SIM_IMU_CFG: ImuSensorCfg = ImuSensorCfg { output_rate: 0, accel_range: 1, gyro_range: 0 };
 /// Room half-extents (m) around the sensor, and the sensor's height above the floor.
 const ROOM: [f32; 3] = [5.0, 4.0, 3.0];
 const SENSOR_HEIGHT: f32 = 1.0;
@@ -48,11 +52,13 @@ impl FakeLidar {
 
         let running = Arc::new(AtomicBool::new(true));
         let sampling = Arc::new(AtomicBool::new(false));
+        let imu_cfg = Arc::new(Mutex::new(SIM_IMU_CFG));
 
         let control = std::thread::spawn({
             let running = running.clone();
             let sampling = sampling.clone();
-            move || serve_control(cmd, &running, &sampling)
+            let imu_cfg = imu_cfg.clone();
+            move || serve_control(cmd, &running, &sampling, &imu_cfg)
         });
 
         let stream = std::thread::spawn({
@@ -63,13 +69,18 @@ impl FakeLidar {
                 let (mut n_points, mut n_imu) = (0u64, 0u64);
                 let mut udp_cnt = 0u16;
                 let mut imu_cnt = 0u16;
+                let mut imu_hz = 0.0;
                 while running.load(Relaxed) {
                     std::thread::sleep(Duration::from_millis(2));
                     let now = start.elapsed().as_secs_f64();
-                    if !sampling.load(Relaxed) {
+                    let hz = f64::from(imu_cfg.lock().unwrap().rate().unwrap_or_default().hz());
+                    if !sampling.load(Relaxed) || hz != imu_hz {
+                        imu_hz = hz;
                         n_points = (now / packet_period) as u64;
-                        n_imu = (now * IMU_RATE_HZ) as u64;
-                        continue;
+                        n_imu = (now * imu_hz) as u64;
+                        if !sampling.load(Relaxed) {
+                            continue;
+                        }
                     }
                     while (n_points as f64) * packet_period < now {
                         let t_ns = (n_points as f64 * packet_period * 1e9) as u64;
@@ -77,8 +88,8 @@ impl FakeLidar {
                         n_points += 1;
                         udp_cnt = udp_cnt.wrapping_add(1);
                     }
-                    while (n_imu as f64) / IMU_RATE_HZ < now {
-                        let t_ns = (n_imu as f64 / IMU_RATE_HZ * 1e9) as u64;
+                    while (n_imu as f64) / imu_hz < now {
+                        let t_ns = (n_imu as f64 / imu_hz * 1e9) as u64;
                         let _ = data.send_to(&imu_packet(t_ns, imu_cnt), imu_dst);
                         n_imu += 1;
                         imu_cnt = imu_cnt.wrapping_add(1);
@@ -104,19 +115,26 @@ impl Drop for FakeLidar {
 }
 
 /// Acknowledges every parameter write on `cmd` (a socket with a read
-/// timeout), tracking whether the host has asked for sampling, until `running`
-/// is cleared.
-pub(crate) fn serve_control(cmd: UdpSocket, running: &AtomicBool, sampling: &AtomicBool) {
+/// timeout), tracking whether the host has asked for sampling and the IMU
+/// configuration it set, and answers queries of that configuration, until
+/// `running` is cleared.
+pub(crate) fn serve_control(cmd: UdpSocket, running: &AtomicBool, sampling: &AtomicBool, imu_cfg: &Mutex<ImuSensorCfg>) {
     let mut buf = [0u8; 1500];
     while running.load(Relaxed) {
         let Ok((len, from)) = cmd.recv_from(&mut buf) else { continue };
         let Ok(req) = ControlCommandPacket::read(&mut Cursor::new(&buf[..len])) else {
             continue;
         };
+        if matches!(req.header.cmd_id, CommandID::LidarInquireInfo) {
+            let _ = cmd.send_to(&query_ack(&req, *imu_cfg.lock().unwrap()), from);
+            continue;
+        }
         if let Ok(list) = KeyValueList::read(&mut Cursor::new(&req.data)) {
             for item in list.items {
-                if let KeyValue::WorkTgtMode(state) = item.value {
-                    sampling.store(matches!(state, WorkState::Sampling), Relaxed);
+                match item.value {
+                    KeyValue::WorkTgtMode(state) => sampling.store(matches!(state, WorkState::Sampling), Relaxed),
+                    KeyValue::ImuSensorCfg(cfg) => *imu_cfg.lock().unwrap() = cfg,
+                    _ => {}
                 }
             }
         }
@@ -132,11 +150,28 @@ fn ack(req: &ControlCommandPacket) -> Vec<u8> {
     }
     .write(&mut data)
     .unwrap();
-    let data = data.into_inner();
+    reply(req, CommandID::LidarParamInfoConfig, data.into_inner())
+}
+
+/// Answers a query with the keys it knows (only the IMU configuration).
+fn query_ack(req: &ControlCommandPacket, imu_cfg: ImuSensorCfg) -> Vec<u8> {
+    let keys: Vec<u16> = req.data.get(4..).unwrap_or_default().chunks_exact(2).map(|k| u16::from_le_bytes([k[0], k[1]])).collect();
+    let known: Vec<u16> = keys.into_iter().filter(|&k| k == Key::ImuSensorCfg as u16).collect();
+    let mut data = vec![0];
+    data.extend_from_slice(&(known.len() as u16).to_le_bytes());
+    for key in known {
+        data.extend_from_slice(&key.to_le_bytes());
+        data.extend_from_slice(&3u16.to_le_bytes());
+        data.extend_from_slice(&[imu_cfg.output_rate, imu_cfg.accel_range, imu_cfg.gyro_range]);
+    }
+    reply(req, CommandID::LidarInquireInfo, data)
+}
+
+fn reply(req: &ControlCommandPacket, cmd_id: CommandID, data: Vec<u8>) -> Vec<u8> {
     let header = ControlCommandPacketHeader {
         length: 24 + data.len() as u16,
         seq_num: req.header.seq_num,
-        cmd_id: CommandID::LidarParamInfoConfig,
+        cmd_id,
         cmd_type: CommandType::Ack,
         sender_type: SenderType::Lidar,
     };

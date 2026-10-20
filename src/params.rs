@@ -90,6 +90,18 @@ pub fn params_imu_enable(enable: bool) -> KeyValueList {
     }
 }
 
+/// Sets the IMU's output rate and ranges, all three at once (the key has
+/// no way to set one alone): see `Device::set_imu_rate` to change the rate
+/// while keeping the lidar's ranges.
+pub fn params_imu_sensor_cfg(cfg: ImuSensorCfg) -> KeyValueList {
+    KeyValueList {
+        items: vec![KeyValueItem {
+            key: Key::ImuSensorCfg,
+            value: KeyValue::ImuSensorCfg(cfg),
+        }],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,5 +133,34 @@ mod tests {
         let items = parse_query_ack(&ack).unwrap();
         assert_eq!(items, vec![(0x800C, vec![1]), (0x800B, vec![0xFF; 8])]);
         assert!(parse_query_ack(&ack[..10]).is_err());
+    }
+
+    #[test]
+    fn imu_sensor_cfg_packet() {
+        // 500 Hz, ±8 g, ±2000 dps.
+        let cfg = ImuSensorCfg { output_rate: ImuRate::Hz500.code(), accel_range: 1, gyro_range: 0 };
+        let bytes = packet_set_params(9, params_imu_sensor_cfg(cfg)).unwrap();
+        // header(24) + key_num(2) + rsvd(2) + key(2) + len(2) + value(3)
+        assert_eq!(bytes.len(), 35);
+        let packet = ControlCommandPacket::read(&mut Cursor::new(&bytes)).unwrap();
+        assert!(matches!(packet.header.cmd_id, CommandID::LidarParamInfoConfig));
+        assert_eq!(packet.header.length as usize, bytes.len());
+        assert_eq!(packet.crc32, CRC_DATA.checksum(&bytes[24..]));
+        assert_eq!(&bytes[24..], &[1, 0, 0, 0, 0x2B, 0x00, 0x03, 0x00, 1, 1, 0]);
+        let list = KeyValueList::read(&mut Cursor::new(&packet.data)).unwrap();
+        assert!(matches!(list.items[0].value, KeyValue::ImuSensorCfg(c) if c == cfg));
+        assert_eq!((cfg.rate(), cfg.accel_range_g(), cfg.gyro_range_dps()), (Some(ImuRate::Hz500), Some(8.0), Some(2000.0)));
+    }
+
+    #[test]
+    fn imu_rate_codes_follow_the_protocol() {
+        // data[0] output_rate 0: 200 Hz, 1: 500 Hz, 2: 100 Hz, 3: 50 Hz.
+        let codes: Vec<_> = (0..4).map(|c| ImuRate::from_code(c).map(ImuRate::hz)).collect();
+        assert_eq!(codes, [Some(200), Some(500), Some(100), Some(50)]);
+        assert_eq!(ImuRate::from_code(4), None);
+        assert_eq!(ImuRate::from_hz(100), Some(ImuRate::Hz100));
+        assert_eq!(ImuRate::default(), ImuRate::Hz200);
+        let c = ImuSensorCfg { output_rate: 0, accel_range: 3, gyro_range: 7 };
+        assert_eq!((c.accel_range_g(), c.gyro_range_dps()), (Some(32.0), Some(15.625)));
     }
 }
