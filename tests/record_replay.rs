@@ -135,3 +135,43 @@ fn datagrams_handed_to_a_sink_replay_like_the_live_stream() {
         assert_eq!(pick(&replayed), pick(&live), "imu stream: {imu}");
     }
 }
+
+#[test]
+fn a_record_sink_set_on_an_open_device_gets_the_datagrams_until_cleared() {
+    use std::sync::atomic::AtomicU64;
+    use std::sync::Arc;
+    // Off this file's other tests' ports too.
+    let mut cfg = config();
+    cfg.lidar_cmd_port += 2000;
+    cfg.host_cmd_port += 2000;
+    cfg.host_point_port += 2000;
+    cfg.host_imu_port += 2000;
+    let _lidar = FakeLidar::spawn(&cfg).unwrap();
+    let (mut device, rx) = Device::open(cfg).unwrap();
+    device.start().unwrap();
+    let count = |n: &Arc<AtomicU64>| {
+        let n = n.clone();
+        livox_rust::DatagramSink(Arc::new(move |_, _, _, _: &[u8]| {
+            n.fetch_add(1, Relaxed);
+        }))
+    };
+    let (first, second) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    std::thread::sleep(Duration::from_millis(100));
+    device.set_record_sink(Some(count(&first)));
+    std::thread::sleep(Duration::from_millis(200));
+    device.set_record_sink(Some(count(&second)));
+    let first_total = first.load(Relaxed);
+    std::thread::sleep(Duration::from_millis(200));
+    device.set_record_sink(None);
+    let second_total = second.load(Relaxed);
+    std::thread::sleep(Duration::from_millis(100));
+    device.stop().unwrap();
+    let received = collect_while(&rx, || false);
+
+    assert!(first_total > 0 && second_total > 0, "{first_total} then {second_total} datagrams");
+    // Neither sink is called once replaced.
+    assert_eq!(first.load(Relaxed), first_total);
+    assert_eq!(second.load(Relaxed), second_total);
+    // Before the first sink and after the last, datagrams went to none.
+    assert!((first_total + second_total) < received.len() as u64, "{} of {}", first_total + second_total, received.len());
+}

@@ -16,7 +16,7 @@ use std::{
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
         mpsc::{Receiver, SyncSender, TrySendError},
-        Arc, Mutex,
+        Arc, Mutex, RwLock,
     },
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -37,6 +37,7 @@ use crate::{
 };
 
 type Recorder = Arc<Mutex<pcap::Writer<BufWriter<File>>>>;
+type SharedSink = Arc<RwLock<Option<DatagramSink>>>;
 
 /// Where to hand every datagram from the lidar as it arrives, before it is
 /// parsed (`Config::record_sink`): its host receive time (ns since the Unix
@@ -72,7 +73,8 @@ pub struct Config {
     /// (replay it with `replay::ReplayLidar`).
     pub record: Option<PathBuf>,
     /// Hand every datagram from the lidar, as received, to this (to record
-    /// it some other way than as pcap).
+    /// it some other way than as pcap); changed on an open device with
+    /// `Device::set_record_sink`.
     pub record_sink: Option<DatagramSink>,
     /// The IMU output rate `start` sets (`Device::set_imu_rate`); None
     /// leaves the lidar's as it is.
@@ -156,6 +158,7 @@ pub struct Device {
     stats: Arc<Stats>,
     threads: Vec<JoinHandle<()>>,
     recorder: Option<Recorder>,
+    record_sink: SharedSink,
 }
 
 impl Device {
@@ -187,6 +190,7 @@ impl Device {
             None => None,
         };
 
+        let record_sink: SharedSink = Arc::new(RwLock::new(cfg.record_sink.clone()));
         let mut threads = Vec::new();
         for (port, name) in [(cfg.host_point_port, "livox-points"), (cfg.host_imu_port, "livox-imu")] {
             let socket = bind_data_socket(SocketAddrV4::new(cfg.host_ip, port), cfg.recv_buffer_bytes)
@@ -200,7 +204,7 @@ impl Device {
                 running: running.clone(),
                 stats: stats.clone(),
                 recorder: recorder.clone(),
-                sink: cfg.record_sink.clone(),
+                sink: record_sink.clone(),
             };
             threads.push(std::thread::Builder::new().name(name.into()).spawn(move || ctx.run())?);
         }
@@ -214,6 +218,7 @@ impl Device {
             stats,
             threads,
             recorder,
+            record_sink,
         };
         Ok(device)
     }
@@ -234,6 +239,14 @@ impl Device {
         self.set_params(params_work_mode(WorkState::IDLE))?;
         self.sampling = false;
         Ok(())
+    }
+
+    /// Hands every datagram from now on to `sink` instead (None: to none),
+    /// without reopening the device. Once it returns, the sink it replaced
+    /// is called no more: a call in progress on a receive thread finishes
+    /// first.
+    pub fn set_record_sink(&self, sink: Option<DatagramSink>) {
+        *self.record_sink.write().unwrap() = sink;
     }
 
     /// Live counters, shareable with other threads.
@@ -408,7 +421,7 @@ struct RecvContext {
     running: Arc<AtomicBool>,
     stats: Arc<Stats>,
     recorder: Option<Recorder>,
-    sink: Option<DatagramSink>,
+    sink: SharedSink,
 }
 
 impl RecvContext {
@@ -442,7 +455,8 @@ impl RecvContext {
                     recorder = None;
                 }
             }
-            if let Some(sink) = &self.sink {
+            // Read-locked while called: `set_record_sink` waits for it.
+            if let Some(sink) = self.sink.read().unwrap().as_ref() {
                 (sink.0)(host_ns, from, local, buf);
             }
             let packet = match data_packet::parse(buf) {
